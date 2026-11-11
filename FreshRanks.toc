@@ -1,0 +1,6 @@
+## Interface: 16001
+## Title: Fresh Ranks
+## Notes: Puts newly learned spell ranks and new spells on your action bars.
+## Version: 1.0.0
+
+FreshRanks.lua
