@@ -9,6 +9,7 @@ local SETTLE_DELAY = 1.0      -- seconds to wait after learning before acting
 local RETRY_DELAY = 1.0       -- seconds between retries
 local COMBAT_RECHECK = 5.0    -- safety recheck while waiting for combat to end
 local MAX_TRIES = 10          -- give up on one learned spell after this many retries
+local PLACE_TRIES = 3         -- give up after this many failed placements
 local KNOWN_TRIES = 3         -- retries waiting for the spell book before acting anyway
 local READY_DELAY = 3.0       -- seconds after the first loading screen before we act
 
@@ -300,30 +301,33 @@ local function NameOnBars(name)
 end
 
 -- Puts spellID into slot. Whatever the slot held before (the old rank) is
--- removed from the cursor. Returns true if the slot now holds that spell rank.
-local function PutSpell(spellID, slot)
+-- removed from the cursor. Returns true if the slot now holds the spell and no
+-- longer holds oldID (the rank it replaces, nil for an empty slot).
+local function PutSpell(spellID, slot, oldID)
     if not CursorEmpty() then return false end
     if C_Spell and C_Spell.PickupSpell then
         pcall(C_Spell.PickupSpell, spellID)
     elseif PickupSpell then
         pcall(PickupSpell, spellID)
     end
-    local cursorType, cursorID = GetCursorInfo()
+    -- For spells the cursor returns: "spell", spell book index, book type, spellID.
+    local cursorType, _, _, cursorSpellID = GetCursorInfo()
     if cursorType ~= "spell" then
         if cursorType ~= nil then ClearCursor() end
         return false
     end
-    -- Only place what we meant to pick up.
-    if type(cursorID) == "number" and cursorID ~= spellID and SpellName(cursorID) ~= SpellName(spellID) then
+    -- Only place what we meant to pick up (same spell; the game may report
+    -- another rank's ID for it).
+    if type(cursorSpellID) == "number" and cursorSpellID ~= spellID
+        and SpellName(cursorSpellID) ~= SpellName(spellID) then
         ClearCursor()
         return false
     end
     PlaceAction(slot)
     ClearCursor()
     local placed = SlotSpell(slot)
-    if not placed then return false end
-    if placed == spellID then return true end
-    return SpellName(placed) == SpellName(spellID) and SpellRank(placed) == SpellRank(spellID)
+    if not placed or placed == oldID then return false end
+    return placed == spellID or SpellName(placed) == SpellName(spellID)
 end
 
 ---------------------------------------------------------------------------
@@ -362,6 +366,17 @@ local function Retry(entry)
     return true
 end
 
+-- Counts a failed placement. Returns true if it should be tried again;
+-- otherwise the entry is dropped and the player is told.
+local function PlaceFailed(entry)
+    entry.placeFails = (entry.placeFails or 0) + 1
+    if entry.placeFails < PLACE_TRIES then return true end
+    RemoveEntry(entry)
+    Print(string.format("Could not put %s on your action bars. Drag it from your spellbook (P).",
+        entry.name or "the new spell"))
+    return false
+end
+
 -- Decide whether a learned spell is a new rank or a new spell.
 local function Classify(entry)
     entry.name = entry.name or SpellName(entry.spellID)
@@ -386,7 +401,7 @@ local function UpgradeSlots(name, targetID, targetRank, fromRank)
             local rank = SpellRank(id)
             if rank and rank < targetRank and rank >= fromRank then
                 if not CursorEmpty() then return nil end
-                if PutSpell(targetID, slot) then
+                if PutSpell(targetID, slot, id) then
                     changed = changed + 1
                 else
                     failed = failed + 1
@@ -423,8 +438,7 @@ local function HandleRankUps(entries)
             order[#order + 1] = e.name
         end
         g.entries[#g.entries + 1] = e
-        if e.prev ~= nil and (g.prev == nil or e.prev < g.prev) then g.prev = e.prev end
-        if g.fallback == nil and e.fallback ~= nil then g.fallback = e.fallback end
+        if g.fromRank == nil and e.fromRank ~= nil then g.fromRank = e.fromRank end
         if not g.top or e.rank > g.top.rank then g.top = e end
     end
 
@@ -432,29 +446,23 @@ local function HandleRankUps(entries)
     for _, name in ipairs(order) do
         local g = groups[name]
         local top = g.top
-        -- Without a remembered previous rank, the best rank that was on the bars
-        -- when we first looked counts as previous, so deliberate downranks stay.
-        if g.prev == nil and g.fallback == nil then
-            g.fallback = HighestRankOnBars(name, top.rank) or false
-            for _, e in ipairs(g.entries) do e.fallback = g.fallback end
+        -- The previous rank is the best rank of this spell on the bars when we
+        -- first look. Lower ranks (placed on purpose for downranking) stay.
+        -- Stored, so a retry never moves on to a lower rank.
+        if g.fromRank == nil then
+            g.fromRank = HighestRankOnBars(name, top.rank) or false
         end
-        local fromRank = g.prev or g.fallback or nil
+        for _, e in ipairs(g.entries) do e.fromRank = g.fromRank end
         local changed, failed = 0, 0
-        if fromRank and fromRank < top.rank then
-            changed, failed = UpgradeSlots(name, top.spellID, top.rank, fromRank)
+        if g.fromRank then
+            changed, failed = UpgradeSlots(name, top.spellID, top.rank, g.fromRank)
             if changed == nil then return false end
         end
         top.done = (top.done or 0) + changed
-        local again = false
-        if failed > 0 then
-            again = Retry(top)
-            if again then
-                for _, e in ipairs(g.entries) do
-                    if e ~= top then e.tries = top.tries end
-                end
+        if failed > 0 and PlaceFailed(top) then
+            for _, e in ipairs(g.entries) do
+                if e ~= top then e.placeFails = top.placeFails end
             end
-        end
-        if again then
             allDone = false
         else
             for _, e in ipairs(g.entries) do RemoveEntry(e) end
@@ -498,14 +506,9 @@ local function HandleNewSpell(entry, freeSlots)
         Print(string.format("%s added to action bar %d.", entry.name, spot.label))
         return true
     end
-    if not SlotEmpty(spot.slot) then
-        -- Something else landed in that slot. Leave it alone and look for a
-        -- free slot again on the next try.
-        return not Retry(entry)
-    end
-    table.insert(freeSlots, 1, spot)
-    if not Retry(entry) then Remember(entry.name, entry.rank) return true end
-    return false
+    Remember(entry.name, entry.rank)
+    if SlotEmpty(spot.slot) then table.insert(freeSlots, 1, spot) end
+    return not PlaceFailed(entry)
 end
 
 local function FlushNow()

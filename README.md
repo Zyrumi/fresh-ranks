@@ -21,6 +21,7 @@ Fresh Ranks: Arcane Missiles added to action bar 1.
 - **In combat:** action bars cannot be changed during combat. Fresh Ranks waits and updates your bars as soon as combat ends.
 - **Holding something on your mouse:** it waits until your mouse cursor is empty, so it never drops what you are dragging.
 - **No free slot:** if all your shown bars are full, nothing is changed and chat tells you to drag the spell from your spellbook (press P).
+- **If a spell cannot be placed:** after 3 tries, chat tells you to drag it from your spellbook (press P) yourself.
 - **Passive spells and profession spells** (like Find Herbs) are not placed on your bars.
 - **Spells you already have when you log in** are not touched. Fresh Ranks only reacts to spells you learn while it is running.
 - **Controller mode** uses its own bars, which Fresh Ranks does not change.
